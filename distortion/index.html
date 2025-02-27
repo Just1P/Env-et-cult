@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Effets de Shaders Améliorés</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+      #controls {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: rgba(0, 0, 0, 0.7);
+        color: white;
+        padding: 10px;
+        border-radius: 5px;
+        font-family: Arial, sans-serif;
+      }
+      .control-group {
+        margin-bottom: 10px;
+      }
+      label {
+        display: inline-block;
+        width: 100px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="controls">
+      <div class="control-group">
+        <label for="strength">Force:</label>
+        <input
+          type="range"
+          id="strength"
+          min="0"
+          max="2"
+          step="0.05"
+          value="0.5"
+        />
+        <span id="strengthValue">0.5</span>
+      </div>
+      <div class="control-group">
+        <label for="speed">Vitesse:</label>
+        <input
+          type="range"
+          id="speed"
+          min="0"
+          max="0.05"
+          step="0.001"
+          value="0.01"
+        />
+        <span id="speedValue">0.01</span>
+      </div>
+      <div class="control-group">
+        <label for="frequency">Fréquence:</label>
+        <input
+          type="range"
+          id="frequency"
+          min="1"
+          max="20"
+          step="0.5"
+          value="5"
+        />
+        <span id="frequencyValue">5.0</span>
+      </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+      // Initialisation de la scène
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        75,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000
+      );
+      const renderer = new THREE.WebGLRenderer();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      // Paramètres de l'effet
+      const params = {
+        strength: 0.5,
+        speed: 0.01,
+        frequency: 5.0,
+      };
+
+      // Création d'un plan
+      const geometry = new THREE.PlaneGeometry(2, 2, 100, 100);
+
+      // Shader pour la déformation de l'espace
+      const warpUniforms = {
+        time: { value: 0 },
+        strength: { value: params.strength },
+        frequency: { value: params.frequency },
+      };
+
+      const vertexShader = `
+        uniform float time;
+        uniform float strength;
+        uniform float frequency;
+        varying vec2 vUv;
+
+        void main() {
+            vUv = uv;
+            vec3 pos = position;
+            
+            // Distortion multi-vague
+            float wave1 = sin(time * 0.7 + pos.x * frequency) * sin(time * 0.8 + pos.y * frequency);
+            float wave2 = sin(time * 0.5 + pos.x * frequency * 0.5) * sin(time * 0.6 + pos.y * frequency * 0.5) * 0.5;
+            float distortion = (wave1 + wave2) * strength;
+            
+            pos.z += distortion;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+        }
+      `;
+
+      const fragmentShader = `
+        varying vec2 vUv;
+        uniform float time;
+
+        void main() {
+            vec2 uv = vUv;
+            float pattern = sin(uv.x * 10.0 + time) * sin(uv.y * 10.0 + time);
+            
+            // Couleurs changeantes basées sur le temps
+            vec3 color1 = vec3(0.5 + 0.5 * sin(time), 0.5 + 0.5 * sin(time * 0.7), 0.5 + 0.5 * sin(time * 0.3));
+            vec3 color2 = vec3(0.5 + 0.5 * sin(time * 0.8), 0.5 + 0.5 * sin(time * 0.5), 0.5 + 0.5 * sin(time * 0.9));
+            
+            vec3 color = mix(color1, color2, pattern * 0.5 + 0.5);
+            gl_FragColor = vec4(color, 1.0);
+        }
+      `;
+
+      const material = new THREE.ShaderMaterial({
+        uniforms: warpUniforms,
+        vertexShader: vertexShader,
+        fragmentShader: fragmentShader,
+        side: THREE.DoubleSide,
+      });
+
+      const plane = new THREE.Mesh(geometry, material);
+      scene.add(plane);
+
+      camera.position.z = 2;
+
+      // Contrôles interactifs
+      const strengthSlider = document.getElementById("strength");
+      const speedSlider = document.getElementById("speed");
+      const frequencySlider = document.getElementById("frequency");
+      const strengthValue = document.getElementById("strengthValue");
+      const speedValue = document.getElementById("speedValue");
+      const frequencyValue = document.getElementById("frequencyValue");
+
+      strengthSlider.addEventListener("input", function () {
+        params.strength = parseFloat(this.value);
+        warpUniforms.strength.value = params.strength;
+        strengthValue.textContent = params.strength.toFixed(2);
+      });
+
+      speedSlider.addEventListener("input", function () {
+        params.speed = parseFloat(this.value);
+        speedValue.textContent = params.speed.toFixed(3);
+      });
+
+      frequencySlider.addEventListener("input", function () {
+        params.frequency = parseFloat(this.value);
+        warpUniforms.frequency.value = params.frequency;
+        frequencyValue.textContent = params.frequency.toFixed(1);
+      });
+
+      // Gestion du redimensionnement
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // Animation
+      function animate() {
+        requestAnimationFrame(animate);
+        warpUniforms.time.value += params.speed;
+        renderer.render(scene, camera);
+      }
+
+      animate();
+    </script>
+  </body>
+</html>
