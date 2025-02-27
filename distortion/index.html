@@ -7,6 +7,10 @@
       body {
         margin: 0;
         overflow: hidden;
+        cursor: grab;
+      }
+      body:active {
+        cursor: grabbing;
       }
       #controls {
         position: absolute;
@@ -17,6 +21,7 @@
         padding: 10px;
         border-radius: 5px;
         font-family: Arial, sans-serif;
+        z-index: 100;
       }
       .control-group {
         margin-bottom: 10px;
@@ -24,6 +29,16 @@
       label {
         display: inline-block;
         width: 100px;
+      }
+      #instructions {
+        position: absolute;
+        bottom: 10px;
+        width: 100%;
+        text-align: center;
+        color: white;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 10px 0;
+        font-family: Arial, sans-serif;
       }
     </style>
   </head>
@@ -35,11 +50,11 @@
           type="range"
           id="strength"
           min="0"
-          max="2"
+          max="1"
           step="0.05"
-          value="0.5"
+          value="0.3"
         />
-        <span id="strengthValue">0.5</span>
+        <span id="strengthValue">0.3</span>
       </div>
       <div class="control-group">
         <label for="speed">Vitesse:</label>
@@ -59,12 +74,20 @@
           type="range"
           id="frequency"
           min="1"
-          max="20"
+          max="10"
           step="0.5"
-          value="5"
+          value="3"
         />
-        <span id="frequencyValue">5.0</span>
+        <span id="frequencyValue">3.0</span>
       </div>
+      <div class="control-group">
+        <label for="wireframe">Wireframe:</label>
+        <input type="checkbox" id="wireframe" />
+      </div>
+    </div>
+
+    <div id="instructions">
+      Cliquez et faites glisser pour tourner autour de la forme
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -81,15 +104,24 @@
       renderer.setSize(window.innerWidth, window.innerHeight);
       document.body.appendChild(renderer.domElement);
 
+      // Variables pour la rotation de caméra
+      let mouseX = 0;
+      let mouseY = 0;
+      let targetRotationX = 0;
+      let targetRotationY = 0;
+      let windowHalfX = window.innerWidth / 2;
+      let windowHalfY = window.innerHeight / 2;
+      let isDragging = false;
+
       // Paramètres de l'effet
       const params = {
-        strength: 0.5,
+        strength: 0.3,
         speed: 0.01,
-        frequency: 5.0,
+        frequency: 3.0,
       };
 
-      // Création d'un plan
-      const geometry = new THREE.PlaneGeometry(2, 2, 100, 100);
+      // Création d'un cube
+      const geometry = new THREE.BoxGeometry(1.5, 1.5, 1.5, 50, 50, 50);
 
       // Shader pour la déformation de l'espace
       const warpUniforms = {
@@ -103,34 +135,53 @@
         uniform float strength;
         uniform float frequency;
         varying vec2 vUv;
+        varying vec3 vPosition;
 
         void main() {
             vUv = uv;
+            vPosition = position;
             vec3 pos = position;
             
-            // Distortion multi-vague
-            float wave1 = sin(time * 0.7 + pos.x * frequency) * sin(time * 0.8 + pos.y * frequency);
-            float wave2 = sin(time * 0.5 + pos.x * frequency * 0.5) * sin(time * 0.6 + pos.y * frequency * 0.5) * 0.5;
+            // Calculer la distance depuis le centre du cube
+            float distance = length(pos);
+            
+            // Distortion multi-vague en fonction de la position 3D
+            float wave1 = sin(time * 0.7 + pos.x * frequency) * sin(time * 0.8 + pos.y * frequency) * sin(time * 0.9 + pos.z * frequency);
+            float wave2 = sin(time * 0.5 + pos.x * frequency * 0.5) * sin(time * 0.6 + pos.y * frequency * 0.5) * sin(time * 0.7 + pos.z * frequency * 0.5) * 0.5;
+            
+            // Appliquer la distortion dans la direction normale à la surface
+            vec3 normal = normalize(pos);
             float distortion = (wave1 + wave2) * strength;
             
-            pos.z += distortion;
+            // Modifie la position en fonction de la distortion
+            pos += normal * distortion;
+            
             gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
         }
       `;
 
       const fragmentShader = `
         varying vec2 vUv;
+        varying vec3 vPosition;
         uniform float time;
 
         void main() {
-            vec2 uv = vUv;
-            float pattern = sin(uv.x * 10.0 + time) * sin(uv.y * 10.0 + time);
+            // Utiliser la position 3D pour un effet de couleur plus complexe
+            vec3 pos = normalize(vPosition);
             
-            // Couleurs changeantes basées sur le temps
+            // Créer un motif basé sur la position 3D
+            float pattern = sin(pos.x * 10.0 + time) * sin(pos.y * 10.0 + time) * sin(pos.z * 10.0 + time);
+            
+            // Couleurs changeantes basées sur le temps et la position
             vec3 color1 = vec3(0.5 + 0.5 * sin(time), 0.5 + 0.5 * sin(time * 0.7), 0.5 + 0.5 * sin(time * 0.3));
             vec3 color2 = vec3(0.5 + 0.5 * sin(time * 0.8), 0.5 + 0.5 * sin(time * 0.5), 0.5 + 0.5 * sin(time * 0.9));
             
+            // Mélanger les couleurs en fonction du motif
             vec3 color = mix(color1, color2, pattern * 0.5 + 0.5);
+            
+            // Ajouter un effet de profondeur basé sur la position normalisée
+            color *= 0.7 + 0.3 * length(pos);
+            
             gl_FragColor = vec4(color, 1.0);
         }
       `;
@@ -140,11 +191,13 @@
         vertexShader: vertexShader,
         fragmentShader: fragmentShader,
         side: THREE.DoubleSide,
+        wireframe: false,
       });
 
       const plane = new THREE.Mesh(geometry, material);
       scene.add(plane);
 
+      // Position initiale de la caméra
       camera.position.z = 2;
 
       // Contrôles interactifs
@@ -154,6 +207,7 @@
       const strengthValue = document.getElementById("strengthValue");
       const speedValue = document.getElementById("speedValue");
       const frequencyValue = document.getElementById("frequencyValue");
+      const wireframeCheckbox = document.getElementById("wireframe");
 
       strengthSlider.addEventListener("input", function () {
         params.strength = parseFloat(this.value);
@@ -172,17 +226,93 @@
         frequencyValue.textContent = params.frequency.toFixed(1);
       });
 
+      wireframeCheckbox.addEventListener("change", function () {
+        material.wireframe = this.checked;
+      });
+
       // Gestion du redimensionnement
       window.addEventListener("resize", () => {
+        windowHalfX = window.innerWidth / 2;
+        windowHalfY = window.innerHeight / 2;
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
       });
 
+      // Référence au conteneur 3D (tout l'écran sauf les contrôles)
+      const container = renderer.domElement;
+
+      // Gestion des événements de souris pour la rotation
+      container.addEventListener("mousedown", onMouseDown, false);
+      document.addEventListener("mousemove", onMouseMove, false);
+      document.addEventListener("mouseup", onMouseUp, false);
+
+      function onMouseDown(event) {
+        // Vérifier si le clic est sur le panel de contrôle
+        const controlPanel = document.getElementById("controls");
+        const rect = controlPanel.getBoundingClientRect();
+
+        // Si le clic est dans les contrôles, ne pas activer la rotation
+        if (
+          event.clientX >= rect.left &&
+          event.clientX <= rect.right &&
+          event.clientY >= rect.top &&
+          event.clientY <= rect.bottom
+        ) {
+          return;
+        }
+
+        event.preventDefault();
+        isDragging = true;
+      }
+
+      function onMouseMove(event) {
+        if (isDragging) {
+          mouseX = (event.clientX - windowHalfX) / 100;
+          mouseY = (event.clientY - windowHalfY) / 100;
+
+          targetRotationX = mouseX * 0.5;
+          targetRotationY = mouseY * 0.5;
+        }
+      }
+
+      function onMouseUp() {
+        isDragging = false;
+      }
+
       // Animation
       function animate() {
         requestAnimationFrame(animate);
+
+        // Mise à jour du temps pour le shader
         warpUniforms.time.value += params.speed;
+
+        // Animation de la caméra en rotation autour de la forme
+        if (!isDragging) {
+          // Ralentissement progressif de la rotation quand on ne tient plus la souris
+          targetRotationX *= 0.98;
+          targetRotationY *= 0.98;
+        }
+
+        // Positionner la caméra en orbite autour de la forme
+        const radius = 2; // Distance par rapport au centre
+
+        // Angle horizontal (autour de l'axe Y)
+        const theta = targetRotationX;
+        // Angle vertical (autour de l'axe X) - limité pour éviter de retourner la caméra
+        const phi = Math.max(
+          -Math.PI / 2 + 0.1,
+          Math.min(Math.PI / 2 - 0.1, targetRotationY)
+        );
+
+        // Conversion des coordonnées sphériques en cartésiennes
+        camera.position.x = radius * Math.sin(theta) * Math.cos(phi);
+        camera.position.y = radius * Math.sin(phi);
+        camera.position.z = radius * Math.cos(theta) * Math.cos(phi);
+
+        // Orientation de la caméra vers le centre
+        camera.lookAt(scene.position);
+
         renderer.render(scene, camera);
       }
 
