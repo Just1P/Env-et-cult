@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Simulateur de Fluides 2D avec Three.js</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        font-family: Arial, sans-serif;
+      }
+
+      #controls {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        background: rgba(0, 0, 0, 0.7);
+        color: white;
+        padding: 10px;
+        border-radius: 5px;
+        z-index: 100;
+      }
+
+      .control-group {
+        margin-bottom: 10px;
+      }
+
+      label {
+        display: inline-block;
+        width: 140px;
+      }
+
+      #info {
+        position: absolute;
+        bottom: 10px;
+        width: 100%;
+        text-align: center;
+        color: white;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 10px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="controls">
+      <div class="control-group">
+        <label for="viscosity">Viscosité:</label>
+        <input
+          type="range"
+          id="viscosity"
+          min="0"
+          max="0.2"
+          step="0.001"
+          value="0.03"
+        />
+        <span id="viscosityValue">0.03</span>
+      </div>
+      <div class="control-group">
+        <label for="diffusion">Diffusion:</label>
+        <input
+          type="range"
+          id="diffusion"
+          min="0"
+          max="0.01"
+          step="0.0001"
+          value="0.0001"
+        />
+        <span id="diffusionValue">0.0001</span>
+      </div>
+      <div class="control-group">
+        <label for="velocityScale">Force d'injection:</label>
+        <input
+          type="range"
+          id="velocityScale"
+          min="1"
+          max="50"
+          step="1"
+          value="15"
+        />
+        <span id="velocityScaleValue">15</span>
+      </div>
+      <div class="control-group">
+        <label for="colorIntensity">Intensité des couleurs:</label>
+        <input
+          type="range"
+          id="colorIntensity"
+          min="1"
+          max="10"
+          step="0.1"
+          value="5"
+        />
+        <span id="colorIntensityValue">5</span>
+      </div>
+      <div class="control-group">
+        <button id="reset">Réinitialiser</button>
+        <button id="changeColor">Changer couleur</button>
+      </div>
+    </div>
+
+    <div id="info">Cliquez et déplacez la souris pour injecter du fluide</div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+      // Initialisation de Three.js
+      const renderer = new THREE.WebGLRenderer();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      // Constantes et variables pour la simulation
+      const params = {
+        viscosity: 0.03, // Viscosité du fluide
+        diffusion: 0.0001, // Taux de diffusion de la densité
+        velocityScale: 15, // Facteur d'échelle pour la force d'injection
+        colorIntensity: 5, // Intensité des couleurs
+        simRes: 256, // Résolution de la simulation (doit être une puissance de 2)
+        dyeRes: 1024, // Résolution de la texture de couleur (plus élevée pour un rendu plus net)
+        isMouseDown: false,
+        prevMouseX: 0,
+        prevMouseY: 0,
+        baseColor: new THREE.Vector3(0.5, 0.3, 1.0), // Couleur de base (R, G, B)
+      };
+
+      // Création de la scène et de la caméra
+      const scene = new THREE.Scene();
+      const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+      // Variables pour les textures et les framebuffers
+      let velocityTexture1, velocityTexture2;
+      let densityTexture1, densityTexture2;
+      let velocityFBO1, velocityFBO2;
+      let densityFBO1, densityFBO2;
+
+      // Shaders
+      // 1. Shader pour l'advection (mouvement du fluide)
+      const advectionVertexShader = `
+      varying vec2 vUv;
+      
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `;
+
+      const advectionFragmentShader = `
+      varying vec2 vUv;
+      uniform sampler2D uVelocity;
+      uniform sampler2D uSource;
+      uniform float uDt;
+      uniform float uDissipation;
+      uniform vec2 uTexelSize;
+      
+      void main() {
+        vec2 coord = vUv - uDt * texture2D(uVelocity, vUv).xy * uTexelSize;
+        gl_FragColor = uDissipation * texture2D(uSource, coord);
+      }
+    `;
+
+      // 2. Shader pour la diffusion (étalement du fluide)
+      const diffusionFragmentShader = `
+      varying vec2 vUv;
+      uniform sampler2D uVelocity;
+      uniform sampler2D uSource;
+      uniform float uDiffusion;
+      uniform float uDt;
+      uniform vec2 uTexelSize;
+      
+      void main() {
+        vec2 coord = vUv - uTexelSize * 0.5;
+        
+        // Échantillonnage des pixels voisins
+        vec4 xL = texture2D(uSource, coord - vec2(uTexelSize.x, 0.0));
+        vec4 xR = texture2D(uSource, coord + vec2(uTexelSize.x, 0.0));
+        vec4 yT = texture2D(uSource, coord + vec2(0.0, uTexelSize.y));
+        vec4 yB = texture2D(uSource, coord - vec2(0.0, uTexelSize.y));
+        
+        // Échantillonnage du pixel actuel
+        vec4 center = texture2D(uSource, coord);
+        
+        // Application de la diffusion (équation de diffusion discrète)
+        gl_FragColor = (center + uDiffusion * (xL + xR + yT + yB)) / (1.0 + 4.0 * uDiffusion);
+      }
+    `;
+
+      // 3. Shader pour la résolution de la pression (conservation de la masse)
+      const pressureFragmentShader = `
+      varying vec2 vUv;
+      uniform sampler2D uPressure;
+      uniform sampler2D uDivergence;
+      uniform vec2 uTexelSize;
+      
+      void main() {
+        vec2 coord = vUv - uTexelSize * 0.5;
+        
+        // Échantillonnage des pixels voisins
+        float pL = texture2D(uPressure, coord - vec2(uTexelSize.x, 0.0)).x;
+        float pR = texture2D(uPressure, coord + vec2(uTexelSize.x, 0.0)).x;
+        float pT = texture2D(uPressure, coord + vec2(0.0, uTexelSize.y)).x;
+        float pB = texture2D(uPressure, coord - vec2(0.0, uTexelSize.y)).x;
+        
+        // Échantillonnage de la divergence
+        float div = texture2D(uDivergence, coord).x;
+        
+        // Résolution de l'équation de pression (méthode de Jacobi)
+        gl_FragColor = vec4((pL + pR + pT + pB - div) * 0.25, 0.0, 0.0, 1.0);
+      }
+    `;
+
+      // 4. Shader pour le calcul de la divergence
+      const divergenceFragmentShader = `
+      varying vec2 vUv;
+      uniform sampler2D uVelocity;
+      uniform vec2 uTexelSize;
+      
+      void main() {
+        vec2 coord = vUv - uTexelSize * 0.5;
+        
+        // Échantillonnage des vélocités voisines
+        float vL = texture2D(uVelocity, coord - vec2(uTexelSize.x, 0.0)).x;
+        float vR = texture2D(uVelocity, coord + vec2(uTexelSize.x, 0.0)).x;
+        float vT = texture2D(uVelocity, coord + vec2(0.0, uTexelSize.y)).y;
+        float vB = texture2D(uVelocity, coord - vec2(0.0, uTexelSize.y)).y;
+        
+        // Calcul de la divergence (∇·v)
+        float div = (vR - vL + vT - vB) * 0.5;
+        gl_FragColor = vec4(div, 0.0, 0.0, 1.0);
+      }
+    `;
+
+      // 5. Shader pour la soustraction du gradient de pression
+      const gradientSubtractFragmentShader = `
+      varying vec2 vUv;
+      uniform sampler2D uPressure;
+      uniform sampler2D uVelocity;
+      uniform vec2 uTexelSize;
+      
+      void main() {
+        vec2 coord = vUv - uTexelSize * 0.5;
+        
+        // Échantillonnage de la pression aux pixels voisins
+        float pL = texture2D(uPressure, coord - vec2(uTexelSize.x, 0.0)).x;
+        float pR = texture2D(uPressure, coord + vec2(uTexelSize.x, 0.0)).x;
+        float pT = texture2D(uPressure, coord + vec2(0.0, uTexelSize.y)).x;
+        float pB = texture2D(uPressure, coord - vec2(0.0, uTexelSize.y)).x;
+        
+        // Échantillonnage de la vélocité actuelle
+        vec2 velocity = texture2D(uVelocity, coord).xy;
+        
+        // Soustraction du gradient de pression
+        velocity.x -= (pR - pL) * 0.5;
+        velocity.y -= (pT - pB) * 0.5;
+        
+        gl_FragColor = vec4(velocity, 0.0, 1.0);
+      }
+    `;
+
+      // 6. Shader pour l'ajout d'impulsions extérieures
+      const splatFragmentShader = `
+      varying vec2 vUv;
+      uniform sampler2D uTarget;
+      uniform float uAspectRatio;
+      uniform vec3 uColor;
+      uniform vec2 uPoint;
+      uniform float uRadius;
+      
+      void main() {
+        vec2 coord = vUv - uTexelSize * 0.5;
+        
+        // Calcul de la distance au point d'impact
+        vec2 p = coord - uPoint;
+        p.x *= uAspectRatio;
+        
+        // Calcul de l'intensité de l'impact basé sur la distance
+        float splat = exp(-dot(p, p) / uRadius);
+        
+        // Mélange avec la texture existante
+        vec3 base = texture2D(uTarget, coord).xyz;
+        gl_FragColor = vec4(base + splat * uColor, 1.0);
+      }
+    `;
+
+      // 7. Shader pour le rendu final
+      const displayFragmentShader = `
+      varying vec2 vUv;
+      uniform sampler2D uDensity;
+      uniform float uColorIntensity;
+      
+      void main() {
+        vec3 color = texture2D(uDensity, vUv).xyz;
+        
+        // Amélioration de la visibilité et du contraste
+        color = max(color, 0.0);
+        color = color * uColorIntensity;
+        color = 1.0 - exp(-color);
+        
+        gl_FragColor = vec4(color, 1.0);
+      }
+    `;
+
+      // Initialisation des textures et des FBOs
+      function initializeTextures() {
+        const simRes = params.simRes;
+        const dyeRes = params.dyeRes;
+
+        // Options pour les textures
+        const texOptions = {
+          minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter,
+          internalFormat: THREE.RGBAFormat,
+          format: THREE.RGBAFormat,
+          type: THREE.FloatType,
+          wrapS: THREE.ClampToEdgeWrapping,
+          wrapT: THREE.ClampToEdgeWrapping,
+        };
+
+        // Création des textures pour la vélocité
+        velocityTexture1 = new THREE.WebGLRenderTarget(
+          simRes,
+          simRes,
+          texOptions
+        );
+        velocityTexture2 = new THREE.WebGLRenderTarget(
+          simRes,
+          simRes,
+          texOptions
+        );
+
+        // Création des textures pour la densité (colorant)
+        densityTexture1 = new THREE.WebGLRenderTarget(
+          dyeRes,
+          dyeRes,
+          texOptions
+        );
+        densityTexture2 = new THREE.WebGLRenderTarget(
+          dyeRes,
+          dyeRes,
+          texOptions
+        );
+
+        // Initialisation des données
+        clearTextures();
+      }
+
+      // Fonction pour réinitialiser les textures
+      function clearTextures() {
+        // Création d'un écran plein pour rendre les textures
+        const clearMaterial = new THREE.ShaderMaterial({
+          vertexShader: advectionVertexShader,
+          fragmentShader: `
+          void main() {
+            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+          }
+        `,
+        });
+
+        renderer.setRenderTarget(velocityTexture1);
+        renderer.render(clearMesh, camera);
+
+        renderer.setRenderTarget(velocityTexture2);
+        renderer.render(clearMesh, camera);
+
+        renderer.setRenderTarget(densityTexture1);
+        renderer.render(clearMesh, camera);
+
+        renderer.setRenderTarget(densityTexture2);
+        renderer.render(clearMesh, camera);
+
+        renderer.setRenderTarget(null);
+      }
+
+      // Création des matériaux pour chaque étape de la simulation
+      let advectionMaterial, diffusionMaterial, pressureMaterial;
+      let divergenceMaterial,
+        gradientSubtractMaterial,
+        splatMaterial,
+        displayMaterial;
+
+      function createMaterials() {
+        // Advection (mouvement)
+        advectionMaterial = new THREE.ShaderMaterial({
+          vertexShader: advectionVertexShader,
+          fragmentShader: advectionFragmentShader,
+          uniforms: {
+            uVelocity: { value: velocityTexture1.texture },
+            uSource: { value: null },
+            uDt: { value: 0.016 },
+            uDissipation: { value: 0.99 },
+            uTexelSize: {
+              value: new THREE.Vector2(
+                1.0 / params.simRes,
+                1.0 / params.simRes
+              ),
+            },
+          },
+        });
+
+        // Diffusion (étalement)
+        diffusionMaterial = new THREE.ShaderMaterial({
+          vertexShader: advectionVertexShader,
+          fragmentShader: diffusionFragmentShader,
+          uniforms: {
+            uVelocity: { value: velocityTexture1.texture },
+            uSource: { value: null },
+            uDiffusion: { value: params.diffusion },
+            uDt: { value: 0.016 },
+            uTexelSize: {
+              value: new THREE.Vector2(
+                1.0 / params.simRes,
+                1.0 / params.simRes
+              ),
+            },
+          },
+        });
+
+        // Calcul de la divergence
+        divergenceMaterial = new THREE.ShaderMaterial({
+          vertexShader: advectionVertexShader,
+          fragmentShader: divergenceFragmentShader,
+          uniforms: {
+            uVelocity: { value: velocityTexture1.texture },
+            uTexelSize: {
+              value: new THREE.Vector2(
+                1.0 / params.simRes,
+                1.0 / params.simRes
+              ),
+            },
+          },
+        });
+
+        // Résolution de la pression
+        pressureMaterial = new THREE.ShaderMaterial({
+          vertexShader: advectionVertexShader,
+          fragmentShader: pressureFragmentShader,
+          uniforms: {
+            uPressure: { value: null },
+            uDivergence: { value: null },
+            uTexelSize: {
+              value: new THREE.Vector2(
+                1.0 / params.simRes,
+                1.0 / params.simRes
+              ),
+            },
+          },
+        });
+
+        // Soustraction du gradient de pression
+        gradientSubtractMaterial = new THREE.ShaderMaterial({
+          vertexShader: advectionVertexShader,
+          fragmentShader: gradientSubtractFragmentShader,
+          uniforms: {
+            uPressure: { value: null },
+            uVelocity: { value: velocityTexture1.texture },
+            uTexelSize: {
+              value: new THREE.Vector2(
+                1.0 / params.simRes,
+                1.0 / params.simRes
+              ),
+            },
+          },
+        });
+
+        // Ajout d'impulsions (splats)
+        splatMaterial = new THREE.ShaderMaterial({
+          vertexShader: advectionVertexShader,
+          fragmentShader: splatFragmentShader,
+          uniforms: {
+            uTarget: { value: null },
+            uColor: { value: new THREE.Vector3(0.0, 0.0, 0.0) },
+            uPoint: { value: new THREE.Vector2(0.0, 0.0) },
+            uRadius: { value: 0.01 },
+            uAspectRatio: { value: window.innerWidth / window.innerHeight },
+            uTexelSize: {
+              value: new THREE.Vector2(
+                1.0 / params.simRes,
+                1.0 / params.simRes
+              ),
+            },
+          },
+        });
+
+        // Affichage final
+        displayMaterial = new THREE.ShaderMaterial({
+          vertexShader: advectionVertexShader,
+          fragmentShader: displayFragmentShader,
+          uniforms: {
+            uDensity: { value: densityTexture1.texture },
+            uColorIntensity: { value: params.colorIntensity },
+          },
+        });
+      }
+
+      // Création du quad plein écran pour le rendu
+      const quadGeometry = new THREE.PlaneGeometry(2, 2);
+      const clearMesh = new THREE.Mesh(
+        quadGeometry,
+        new THREE.MeshBasicMaterial()
+      );
+      const screenQuad = new THREE.Mesh(quadGeometry, displayMaterial);
+      scene.add(screenQuad);
+
+      // Fonction pour appliquer une force/couleur à un point spécifique
+      function applyForce(x, y, dirX, dirY, color) {
+        const aspectRatio = window.innerWidth / window.innerHeight;
+
+        // Normalisation des coordonnées
+        const posX = x / window.innerWidth;
+        const posY = 1.0 - y / window.innerHeight;
+
+        // Application de la force (vélocité)
+        splatMaterial.uniforms.uTarget.value = velocityTexture1.texture;
+        splatMaterial.uniforms.uPoint.value.set(posX, posY);
+        splatMaterial.uniforms.uColor.value.set(
+          dirX * params.velocityScale,
+          dirY * params.velocityScale,
+          0.0
+        );
+        splatMaterial.uniforms.uRadius.value = 0.01;
+
+        renderer.setRenderTarget(velocityTexture2);
+        renderer.render(new THREE.Mesh(quadGeometry, splatMaterial), camera);
+
+        // Échange des buffers
+        const temp = velocityTexture1;
+        velocityTexture1 = velocityTexture2;
+        velocityTexture2 = temp;
+
+        // Application de la couleur (densité)
+        splatMaterial.uniforms.uTarget.value = densityTexture1.texture;
+        splatMaterial.uniforms.uPoint.value.set(posX, posY);
+        splatMaterial.uniforms.uColor.value.copy(color || params.baseColor);
+        splatMaterial.uniforms.uRadius.value = 0.01;
+
+        renderer.setRenderTarget(densityTexture2);
+        renderer.render(new THREE.Mesh(quadGeometry, splatMaterial), camera);
+
+        // Échange des buffers
+        const tempDye = densityTexture1;
+        densityTexture1 = densityTexture2;
+        densityTexture2 = tempDye;
+      }
+
+      // Étape de simulation principale
+      function step() {
+        // 1. Advection de la vélocité
+        advectionMaterial.uniforms.uVelocity.value = velocityTexture1.texture;
+        advectionMaterial.uniforms.uSource.value = velocityTexture1.texture;
+        advectionMaterial.uniforms.uDissipation.value = 0.99; // Légère dissipation
+
+        renderer.setRenderTarget(velocityTexture2);
+        renderer.render(
+          new THREE.Mesh(quadGeometry, advectionMaterial),
+          camera
+        );
+
+        // Échange des buffers
+        let temp = velocityTexture1;
+        velocityTexture1 = velocityTexture2;
+        velocityTexture2 = temp;
+
+        // 2. Diffusion de la vélocité (plusieurs itérations)
+        for (let i = 0; i < 4; i++) {
+          diffusionMaterial.uniforms.uSource.value = velocityTexture1.texture;
+          diffusionMaterial.uniforms.uDiffusion.value = params.viscosity;
+
+          renderer.setRenderTarget(velocityTexture2);
+          renderer.render(
+            new THREE.Mesh(quadGeometry, diffusionMaterial),
+            camera
+          );
+
+          temp = velocityTexture1;
+          velocityTexture1 = velocityTexture2;
+          velocityTexture2 = temp;
+        }
+
+        // 3. Calcul de la divergence du champ de vélocité
+        divergenceMaterial.uniforms.uVelocity.value = velocityTexture1.texture;
+
+        const divergenceTexture = new THREE.WebGLRenderTarget(
+          params.simRes,
+          params.simRes,
+          {
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+            format: THREE.RGBAFormat,
+            type: THREE.FloatType,
+          }
+        );
+
+        renderer.setRenderTarget(divergenceTexture);
+        renderer.render(
+          new THREE.Mesh(quadGeometry, divergenceMaterial),
+          camera
+        );
+
+        // 4. Résolution de l'équation de pression (itératif)
+        const pressureTexture1 = new THREE.WebGLRenderTarget(
+          params.simRes,
+          params.simRes,
+          {
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+            format: THREE.RGBAFormat,
+            type: THREE.FloatType,
+          }
+        );
+
+        const pressureTexture2 = new THREE.WebGLRenderTarget(
+          params.simRes,
+          params.simRes,
+          {
+            minFilter: THREE.LinearFilter,
+            magFilter: THREE.LinearFilter,
+            format: THREE.RGBAFormat,
+            type: THREE.FloatType,
+          }
+        );
+
+        // Initialisation à zéro
+        const clearMaterial = new THREE.ShaderMaterial({
+          vertexShader: advectionVertexShader,
+          fragmentShader: `
+          void main() {
+            gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+          }
+        `,
+        });
+
+        renderer.setRenderTarget(pressureTexture1);
+        renderer.render(new THREE.Mesh(quadGeometry, clearMaterial), camera);
+
+        // Itérations pour résoudre la pression (méthode de Jacobi)
+        pressureMaterial.uniforms.uDivergence.value = divergenceTexture.texture;
+
+        for (let i = 0; i < 20; i++) {
+          pressureMaterial.uniforms.uPressure.value = pressureTexture1.texture;
+
+          renderer.setRenderTarget(pressureTexture2);
+          renderer.render(
+            new THREE.Mesh(quadGeometry, pressureMaterial),
+            camera
+          );
+
+          temp = pressureTexture1;
+          pressureTexture1 = pressureTexture2;
+          pressureTexture2 = temp;
+        }
+
+        // 5. Soustraction du gradient de pression
+        gradientSubtractMaterial.uniforms.uPressure.value =
+          pressureTexture1.texture;
+        gradientSubtractMaterial.uniforms.uVelocity.value =
+          velocityTexture1.texture;
+
+        renderer.setRenderTarget(velocityTexture2);
+        renderer.render(
+          new THREE.Mesh(quadGeometry, gradientSubtractMaterial),
+          camera
+        );
+
+        temp = velocityTexture1;
+        velocityTexture1 = velocityTexture2;
+        velocityTexture2 = temp;
+
+        // 6. Advection de la densité (couleur)
+        advectionMaterial.uniforms.uVelocity.value = velocityTexture1.texture;
+        advectionMaterial.uniforms.uSource.value = densityTexture1.texture;
+        advectionMaterial.uniforms.uDissipation.value = 0.97; // Plus forte dissipation pour la couleur
+
+        renderer.setRenderTarget(densityTexture2);
+        renderer.render(
+          new THREE.Mesh(quadGeometry, advectionMaterial),
+          camera
+        );
+
+        temp = densityTexture1;
+        densityTexture1 = densityTexture2;
+        densityTexture2 = temp;
+
+        // 7. Diffusion de la densité
+        for (let i = 0; i < 1; i++) {
+          diffusionMaterial.uniforms.uSource.value = densityTexture1.texture;
+          diffusionMaterial.uniforms.uDiffusion.value = params.diffusion;
+
+          renderer.setRenderTarget(densityTexture2);
+          renderer.render(
+            new THREE.Mesh(quadGeometry, diffusionMaterial),
+            camera
+          );
+
+          temp = densityTexture1;
+          densityTexture1 = densityTexture2;
+          densityTexture2 = temp;
+        }
+
+        // Mise à jour de la texture pour l'affichage
+        displayMaterial.uniforms.uDensity.value = densityTexture1.texture;
+        displayMaterial.uniforms.uColorIntensity.value = params.colorIntensity;
+
+        // Rendu final à l'écran
+        renderer.setRenderTarget(null);
+        renderer.render(scene, camera);
+
+        // Libération de la mémoire
+        divergenceTexture.dispose();
+        pressureTexture1.dispose();
+        pressureTexture2.dispose();
+      }
+
+      // Boucle d'animation
+      function animate() {
+        requestAnimationFrame(animate);
+        step();
+      }
+
+      // Fonction d'initialisation
+      function init() {
+        initializeTextures();
+        createMaterials();
+        animate();
+
+        // Gestion des événements de la souris
+        const canvas = renderer.domElement;
+
+        canvas.addEventListener("mousedown", (e) => {
+          params.isMouseDown = true;
+          params.prevMouseX = e.clientX;
+          params.prevMouseY = e.clientY;
+        });
+
+        canvas.addEventListener("mousemove", (e) => {
+          if (params.isMouseDown) {
+            const dx = e.clientX - params.prevMouseX;
+            const dy = e.clientY - params.prevMouseY;
+
+            if (Math.abs(dx) > 0 || Math.abs(dy) > 0) {
+              applyForce(
+                e.clientX,
+                e.clientY,
+                dx * 0.1,
+                dy * 0.1,
+                params.baseColor
+              );
+            }
+
+            params.prevMouseX = e.clientX;
+            params.prevMouseY = e.clientY;
+          }
+        });
+
+        canvas.addEventListener("mouseup", () => {
+          params.isMouseDown = false;
+        });
+
+        canvas.addEventListener("mouseleave", () => {
+          params.isMouseDown = false;
+        });
+
+        // Gestion des événements tactiles
+        canvas.addEventListener("touchstart", (e) => {
+          params.isMouseDown = true;
+          params.prevMouseX = e.touches[0].clientX;
+          params.prevMouseY = e.touches[0].clientY;
+          e.preventDefault();
+        });
+
+        canvas.addEventListener("touchmove", (e) => {
+          if (params.isMouseDown) {
+            const dx = e.touches[0].clientX - params.prevMouseX;
+            const dy = e.touches[0].clientY - params.prevMouseY;
+
+            if (Math.abs(dx) > 0 || Math.abs(dy) > 0) {
+              applyForce(
+                e.touches[0].clientX,
+                e.touches[0].clientY,
+                dx * 0.1,
+                dy * 0.1,
+                params.baseColor
+              );
+            }
+
+            params.prevMouseX = e.touches[0].clientX;
+            params.prevMouseY = e.touches[0].clientY;
+          }
+          e.preventDefault();
+        });
+
+        canvas.addEventListener("touchend", (e) => {
+          params.isMouseDown = false;
+          e.preventDefault();
+        });
+
+        // Gestion du redimensionnement
+        window.addEventListener("resize", () => {
+          renderer.setSize(window.innerWidth, window.innerHeight);
+          splatMaterial.uniforms.uAspectRatio.value =
+            window.innerWidth / window.innerHeight;
+        });
+
+        // Gestion des contrôles de l'interface
+        const viscositySlider = document.getElementById("viscosity");
+        const diffusionSlider = document.getElementById("diffusion");
+        const velocityScaleSlider = document.getElementById("velocityScale");
+        const colorIntensitySlider = document.getElementById("colorIntensity");
+        const resetButton = document.getElementById("reset");
+        const changeColorButton = document.getElementById("changeColor");
+
+        // Affichage des valeurs
+        const viscosityValue = document.getElementById("viscosityValue");
+        const diffusionValue = document.getElementById("diffusionValue");
+        const velocityScaleValue =
+          document.getElementById("velocityScaleValue");
+        const colorIntensityValue = document.getElementById(
+          "colorIntensityValue"
+        );
+
+        // Mise à jour des paramètres en fonction des contrôles
+        viscositySlider.addEventListener("input", function () {
+          params.viscosity = parseFloat(this.value);
+          viscosityValue.textContent = params.viscosity.toFixed(3);
+        });
+
+        diffusionSlider.addEventListener("input", function () {
+          params.diffusion = parseFloat(this.value);
+          diffusionValue.textContent = params.diffusion.toFixed(4);
+        });
+
+        velocityScaleSlider.addEventListener("input", function () {
+          params.velocityScale = parseFloat(this.value);
+          velocityScaleValue.textContent = params.velocityScale.toFixed(0);
+        });
+
+        colorIntensitySlider.addEventListener("input", function () {
+          params.colorIntensity = parseFloat(this.value);
+          colorIntensityValue.textContent = params.colorIntensity.toFixed(1);
+          displayMaterial.uniforms.uColorIntensity.value =
+            params.colorIntensity;
+        });
+
+        resetButton.addEventListener("click", function () {
+          clearTextures();
+        });
+
+        changeColorButton.addEventListener("click", function () {
+          // Génère une nouvelle couleur aléatoire
+          params.baseColor.set(
+            Math.random() * 0.5 + 0.5, // Rouge (0.5-1.0)
+            Math.random() * 0.5 + 0.2, // Vert (0.2-0.7)
+            Math.random() * 0.8 + 0.2 // Bleu (0.2-1.0)
+          );
+        });
+      }
+
+      // Lancement de l'application
+      init();
+    </script>
+  </body>
+</html>
